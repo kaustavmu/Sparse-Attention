@@ -1,0 +1,4 @@
+/home/ktsim/Documents/Deep Learning Systems/hw3/build/CMakeFiles/ndarray_backend_cpu.dir
+/home/ktsim/Documents/Deep Learning Systems/hw3/build/CMakeFiles/ndarray_backend_cuda.dir
+/home/ktsim/Documents/Deep Learning Systems/hw3/build/CMakeFiles/edit_cache.dir
+/home/ktsim/Documents/Deep Learning Systems/hw3/build/CMakeFiles/rebuild_cache.dir
