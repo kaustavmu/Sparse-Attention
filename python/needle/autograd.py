@@ -4,7 +4,6 @@ from .backend_numpy import Device, cpu, all_devices
 from typing import List, Optional, NamedTuple, Tuple, Union
 from collections import namedtuple
 import numpy
-
 from needle import init
 
 # needle version
@@ -86,6 +85,21 @@ class TensorTupleOp(Op):
     def __call__(self, *args):
         return TensorTuple.make_from_op(self, args)
 
+class SparseTensorOp(Op):
+    """Operator specialized for sparse tensor operations."""
+
+    def __call__(self, *args):
+        return SparseTensor.make_from_op(self, args)
+
+    def compute(self, *args: Tuple["SparseNDArray"]):
+        """Compute forward pass using sparse array operations."""
+        raise NotImplementedError()
+
+    def gradient(
+        self, out_grad: "SparseTensor", node: "SparseTensor"
+    ) -> Union["SparseTensor", Tuple["SparseTensor"]]:
+        """Compute partial adjoint(s) for each sparse input."""
+        raise NotImplementedError()
 
 class Value:
     """A value in the computational graph."""
@@ -364,6 +378,42 @@ class Tensor(Value):
     __radd__ = __add__
     __rmul__ = __mul__
 
+class SparseTensor(Value):
+    """A value node representing a sparse tensor in the computation graph."""
+
+    def __init__(self, sparse_array, *, requires_grad=True):
+        # Optionally validate it’s a supported sparse format
+        assert hasattr(sparse_array, "shape"), "Must have shape attribute"
+        self._init(
+            None,
+            [],
+            cached_data=sparse_array,
+            requires_grad=requires_grad,
+        )
+
+    @property
+    def shape(self):
+        return self.realize_cached_data().shape
+
+    def detach(self):
+        """Detach sparse tensor from computation graph."""
+        return SparseTensor.make_const(self.realize_cached_data())
+
+    @staticmethod
+    def make_from_op(op: Op, inputs: List["SparseTensor"]):
+        tensor = SparseTensor.__new__(SparseTensor)
+        tensor._init(op, inputs)
+        if not LAZY_MODE:
+            if not tensor.requires_grad:
+                return tensor.detach()
+            tensor.realize_cached_data()
+        return tensor
+
+    @staticmethod
+    def make_const(data, requires_grad=False):
+        tensor = SparseTensor.__new__(SparseTensor)
+        tensor._init(None, [], cached_data=data, requires_grad=requires_grad)
+        return tensor
 
 def compute_gradient_of_variables(output_tensor, out_grad):
     """Take gradient of output node with respect to each node in node_list.
@@ -386,33 +436,61 @@ def compute_gradient_of_variables(output_tensor, out_grad):
 
 
 def find_topo_sort(node_list: List[Value]) -> List[Value]:
-    """Given a list of nodes, return a topological sort list of nodes ending in them.
+    """Return a topological order of the computation graph."""
+    visited = set()
+    topo_order = []
 
-    A simple algorithm is to do a post-order DFS traversal on the given nodes,
-    going backwards based on input edges. Since a node is added to the ordering
-    after all its predecessors are traversed due to post-order DFS, we get a topological
-    sort.
-    """
-    ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
-    ### END YOUR SOLUTION
+    def dfs(node):
+        if node in visited:
+            return
+        visited.add(node)
+        for inp in node.inputs:
+            dfs(inp)
+        topo_order.append(node)
+
+    for node in node_list:
+        dfs(node)
+
+    return topo_order
+
 
 
 def topo_sort_dfs(node, visited, topo_order):
     """Post-order DFS"""
-    ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
-    ### END YOUR SOLUTION
+    if node in visited:
+        return
+    visited.add(node)
+    for inp in node.inputs:
+        topo_sort_dfs(inp, visited, topo_order)
+    topo_order.append(node)
 
 
 ##############################
 ####### Helper Methods #######
 ##############################
 
-
 def sum_node_list(node_list):
-    """Custom sum function in order to avoid create redundant nodes in Python sum implementation."""
-    from operator import add
+    """Sum gradients efficiently, supporting both dense and sparse."""
     from functools import reduce
+    from operator import add
 
+    if not node_list:
+        return None
+    
+    from python.needle.ops.sparse_ops import SparseAdd
+    # If any are sparse, keep them sparse
+    if any(isinstance(x, SparseTensor) for x in node_list):
+        def sparse_add(a, b):
+            # handle both sparse & dense
+            if isinstance(a, SparseTensor) and isinstance(b, SparseTensor):
+                return SparseAdd()(a, b)
+            elif isinstance(a, SparseTensor):
+                return SparseAdd()(a, SparseTensor.make_const(b.realize_cached_data()))
+            elif isinstance(b, SparseTensor):
+                return SparseAdd()(SparseTensor.make_const(a.realize_cached_data()), b)
+            else:
+                return a + b
+        return reduce(sparse_add, node_list)
+
+    # Default dense behavior
     return reduce(add, node_list)
