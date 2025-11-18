@@ -1,5 +1,4 @@
 import numpy as np
-import scipy.sparse as sp
 from ..autograd import SparseTensorOp, SparseTensor
 
 
@@ -8,7 +7,24 @@ from ..autograd import SparseTensorOp, SparseTensor
 ###########################################################
 
 def _to_dense(x):
+    """
+    Convert underlying data to a dense NumPy array.
+
+    Supports:
+    - NumPy arrays
+    - Needle NDArray (has .numpy())
+    - Anything array-like that np.asarray can handle
+    """
+    # Needle NDArray: has numpy() method
+    if hasattr(x, "numpy"):
+        return x.numpy()
     return np.asarray(x)
+
+
+def _is_needle_array(x) -> bool:
+    """Detect Needle NDArray-like object (we want to stay in that world if possible)."""
+    return hasattr(x, "numpy") and hasattr(x, "__add__") and hasattr(x, "__matmul__")
+
 
 ###########################################################
 #                  Public sparse wrappers                 #
@@ -35,15 +51,19 @@ def sparse_transpose(a):
 def sparse_relu(a):
     return SparseReLU()(a)
 
+
 ###########################################################
-#                  Operator base classes                  #
+#                  Operator implementations               #
 ###########################################################
 
 class SparseAdd(SparseTensorOp):
     """Elementwise addition for sparse matrices."""
 
     def compute(self, a, b):
-        return np.add(_to_dense(a), _to_dense(b))
+        # If these are Needle NDArrays, use their + directly to preserve sparsity.
+        if _is_needle_array(a) and _is_needle_array(b):
+            return a + b
+        return _to_dense(a) + _to_dense(b)
 
     def gradient(self, out_grad, node):
         # d/dA (A + B) = 1, d/dB (A + B) = 1
@@ -54,10 +74,13 @@ class SparseMul(SparseTensorOp):
     """Elementwise multiplication for sparse matrices."""
 
     def compute(self, a, b):
-        return np.multiply(_to_dense(a), _to_dense(b))
+        if _is_needle_array(a) and _is_needle_array(b):
+            return a * b
+        return _to_dense(a) * _to_dense(b)
 
     def gradient(self, out_grad, node):
         a, b = node.inputs
+        # Gradients use the same algebra (and stay sparse if a/b are sparse NDArrays)
         grad_a = out_grad * b
         grad_b = out_grad * a
         return grad_a, grad_b
@@ -67,7 +90,11 @@ class SparseMatMul(SparseTensorOp):
     """Matrix multiplication supporting sparse inputs."""
 
     def compute(self, a, b):
-        return np.dot(_to_dense(a), _to_dense(b))
+        if _is_needle_array(a) and _is_needle_array(b):
+            # Let NDArray (possibly CSR) handle matmul
+            return a @ b
+        # Fallback dense NumPy
+        return _to_dense(a) @ _to_dense(b)
 
     def gradient(self, out_grad, node):
         a, b = node.inputs
@@ -85,7 +112,9 @@ class SparseAddScalar(SparseTensorOp):
         self.scalar = scalar
 
     def compute(self, a):
-        return a + self.scalar
+        if _is_needle_array(a):
+            return a + self.scalar
+        return _to_dense(a) + self.scalar
 
     def gradient(self, out_grad, node):
         # d/dA (A + c) = 1
@@ -99,7 +128,9 @@ class SparseMulScalar(SparseTensorOp):
         self.scalar = scalar
 
     def compute(self, a):
-        return a * self.scalar
+        if _is_needle_array(a):
+            return a * self.scalar
+        return _to_dense(a) * self.scalar
 
     def gradient(self, out_grad, node):
         # d/dA (c * A) = c
@@ -110,7 +141,11 @@ class SparseTranspose(SparseTensorOp):
     """Transpose sparse or dense input."""
 
     def compute(self, a):
-        return np.transpose(_to_dense(a))
+        if _is_needle_array(a):
+            # NDArray’s transpose is usually called permute, but SparseTensor will
+            # pass whatever .transpose() returns, so we keep this simple:
+            return a.permute((1, 0)) if hasattr(a, "permute") else _to_dense(a).T
+        return _to_dense(a).T
 
     def gradient(self, out_grad, node):
         # d/dA (A^T) = (dL/dA)^T
@@ -119,11 +154,20 @@ class SparseTranspose(SparseTensorOp):
 
 class SparseReLU(SparseTensorOp):
     """ReLU activation for sparse tensors."""
+
     def compute(self, a):
+        if _is_needle_array(a):
+            # ReLU(a) = max(a, 0)
+            return a.maximum(0.0)
         return np.maximum(_to_dense(a), 0)
 
     def gradient(self, out_grad, node):
         """Gradient: mask out gradients where input <= 0."""
         a = node.inputs[0]
-        mask = (_to_dense(a) > 0).astype(float)
+        if _is_needle_array(a.realize_cached_data()):
+            # Use elementwise comparison & masking in NDArray
+            data = a.realize_cached_data()
+            mask = (data > 0)
+            return out_grad * mask
+        mask = (_to_dense(a.realize_cached_data()) > 0).astype(float)
         return out_grad * mask

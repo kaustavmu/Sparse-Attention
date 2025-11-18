@@ -8,6 +8,7 @@ import numpy as np
 
 from . import ndarray_backend_numpy
 from . import ndarray_backend_cpu  # type: ignore[attr-defined]
+from . import ndarray_backend_csr  # type: ignore[attr-defined]
 
 
 # math.prod not in Python 3.7
@@ -75,6 +76,9 @@ def cpu() -> BackendDevice:
     """Return cpu device"""
     return BackendDevice("cpu", ndarray_backend_cpu)
 
+def csr() -> BackendDevice:
+    """Return CSR sparse device"""
+    return BackendDevice("csr", ndarray_backend_csr)
 
 def default_device() -> BackendDevice:
     return cpu_numpy()
@@ -82,7 +86,7 @@ def default_device() -> BackendDevice:
 
 def all_devices() -> list[BackendDevice]:
     """return a list of all available devices"""
-    return [cpu(), cuda(), cpu_numpy()]
+    return [cpu(), cuda(), cpu_numpy(), csr()]
 
 
 def _is_csr_device(device: BackendDevice) -> bool:
