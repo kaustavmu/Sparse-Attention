@@ -391,6 +391,27 @@ class SparseTensor(Value):
             requires_grad=requires_grad,
         )
 
+    def backward(self, out_grad=None):
+        """
+        Backprop starting from this SparseTensor.
+        If out_grad is None, assume scalar output -> grad = 1.
+        """
+        from . import ops  # DO NOT import ones_like
+
+        if out_grad is None:
+            # Create a scalar 1 matching this tensor's device
+            one = SparseTensor(
+                1.0,
+                device=getattr(self, "device", None),
+                requires_grad=False,
+            )
+            out_grad = one
+
+        compute_gradient_of_variables(self, out_grad)
+
+    def sum(self, axes=None):
+        return needle.sparse_ops.Summation(axes)(self)
+    
     @property
     def shape(self):
         return self.realize_cached_data().shape
@@ -421,7 +442,10 @@ def compute_gradient_of_variables(output_tensor, out_grad):
     Store the computed result in the grad field of each Variable.
     """
     # a map from node to a list of gradient contributions from each output node
-    node_to_output_grads_list: Dict[Tensor, List[Tensor]] = {}
+    # node_to_output_grads_list: Dict[Tensor, List[Tensor]] = {}
+    # We allow both Tensor and SparseTensor
+    node_to_output_grads_list: Dict[Any, List[Any]] = {}
+
     # Special note on initializing gradient of
     # We are really taking a derivative of the scalar reduce_sum(output_node)
     # instead of the vector output_node. But this is the common case for loss function.
@@ -431,7 +455,21 @@ def compute_gradient_of_variables(output_tensor, out_grad):
     reverse_topo_order = list(reversed(find_topo_sort([output_tensor])))
 
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    for i in reverse_topo_order:
+        if getattr(i, "requires_grad", False):
+
+            grads = sum_node_list(node_to_output_grads_list[i])
+            i.grad = grads
+
+            if i.op is not None:
+                in_grads = i.op.gradient_as_tuple(grads, i)
+
+                for j, n in enumerate(i.inputs):
+                    if getattr(n, "requires_grad", False):
+                        if n not in node_to_output_grads_list:
+                            node_to_output_grads_list[n] = []
+                        node_to_output_grads_list[n].append(in_grads[j])
+
     ### END YOUR SOLUTION
 
 
@@ -469,28 +507,12 @@ def topo_sort_dfs(node, visited, topo_order):
 ####### Helper Methods #######
 ##############################
 
-def sum_node_list(node_list):
-    """Sum gradients efficiently, supporting both dense and sparse."""
-    from functools import reduce
-    from operator import add
+def sum_node_list(grads):
+    """Sum a list of grad nodes (Tensor or SparseTensor)."""
+    if len(grads) == 0:
+        raise ValueError("No gradients to sum")
 
-    if not node_list:
-        return None
-    
-    from python.needle.ops.sparse_ops import SparseAdd
-    # If any are sparse, keep them sparse
-    if any(isinstance(x, SparseTensor) for x in node_list):
-        def sparse_add(a, b):
-            # handle both sparse & dense
-            if isinstance(a, SparseTensor) and isinstance(b, SparseTensor):
-                return SparseAdd()(a, b)
-            elif isinstance(a, SparseTensor):
-                return SparseAdd()(a, SparseTensor.make_const(b.realize_cached_data()))
-            elif isinstance(b, SparseTensor):
-                return SparseAdd()(SparseTensor.make_const(a.realize_cached_data()), b)
-            else:
-                return a + b
-        return reduce(sparse_add, node_list)
-
-    # Default dense behavior
-    return reduce(add, node_list)
+    out = grads[0]
+    for g in grads[1:]:
+        out = out + g
+    return out

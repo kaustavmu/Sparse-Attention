@@ -51,6 +51,9 @@ def sparse_transpose(a):
 def sparse_relu(a):
     return SparseReLU()(a)
 
+def sparse_sum(a, axes=None):
+    return Summation(axes)(a)
+
 
 ###########################################################
 #                  Operator implementations               #
@@ -171,3 +174,49 @@ class SparseReLU(SparseTensorOp):
             return out_grad * mask
         mask = (_to_dense(a.realize_cached_data()) > 0).astype(float)
         return out_grad * mask
+
+class Summation(SparseTensorOp):
+    """
+    Summation over one or more axes.
+
+    Works for:
+      - NumPy dense arrays
+      - Needle NDArray (dense or sparse/CSR)
+    """
+
+    def __init__(self, axes=None):
+        self.axes = axes
+
+    def compute(self, a):
+        # Handle NDArray device: use its own reduce_sum
+        if _is_needle_array(a):
+            return a.reduce_sum(self.axes)
+
+        # Fall back to NumPy
+        return _to_dense(a).sum(axis=self.axes)
+
+    def gradient(self, out_grad, node):
+        """
+        If y = sum(x, axis),
+        then dy/dx = broadcast_to(out_grad, x.shape)
+        """
+        x = node.inputs[0]
+        x_shape = x.shape
+        axes = self.axes
+
+        # Case 1: sum entire tensor → out_grad is scalar
+        if axes is None:
+            return out_grad.broadcast_to(x_shape)
+
+        # Normalize axes into a tuple
+        if isinstance(axes, int):
+            axes = (axes,)
+
+        # After summation, dimensions are removed.
+        # We need to reshape out_grad by re-inserting the reduced dims.
+        new_shape = list(out_grad.shape)
+        for ax in sorted(axes):
+            new_shape.insert(ax, 1)
+
+        reshaped = out_grad.reshape(new_shape)
+        return reshaped.broadcast_to(x_shape)

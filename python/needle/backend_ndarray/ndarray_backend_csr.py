@@ -323,6 +323,9 @@ def ewise_tanh(a, out):
     res = np.tanh(dense)
     from_numpy(res, out)
 
+def reduce_sum(a, axes=None):
+    return a.reduce_sum(axes)
+
 
 # -------------------- matmul --------------------
 
@@ -388,12 +391,43 @@ def reduce_max(a: Array, out: Array, reduce_size):
     from_numpy(res, out)
 
 
-def reduce_sum(a: Array, out: Array, reduce_size):
-    if a.shape is None:
-        dense = np.zeros((1, a._size), dtype=_datatype)
-    else:
-        dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    flat = dense.reshape(-1)
-    resh = flat.reshape(-1, reduce_size)
-    res = resh.sum(axis=1)
-    from_numpy(res, out)
+def reduce_sum(a, axes=None):
+    """
+    Reduce sum for CSR NDArray.
+    Supports:
+      - sum all elements
+      - sum along axis 0 or 1
+    """
+    data = a.data
+    indices = a.indices
+    indptr = a.indptr
+    m, n = a.shape
+
+    if axes is None:
+        # Sum all stored values
+        return np.sum(data)
+
+    # Normalize to tuple
+    if isinstance(axes, int):
+        axes = (axes,)
+
+    # Only 2D sparse matrices supported
+    if axes == (0,):
+        # Column sum: go through stored elements
+        out = np.zeros(n, dtype=data.dtype)
+        for row in range(m):
+            start, end = indptr[row], indptr[row + 1]
+            cols = indices[start:end]
+            vals = data[start:end]
+            out[cols] += vals
+        return out
+
+    if axes == (1,):
+        # Row sum: sum slices
+        out = np.zeros(m, dtype=data.dtype)
+        for row in range(m):
+            start, end = indptr[row], indptr[row + 1]
+            out[row] = np.sum(data[start:end])
+        return out
+
+    raise NotImplementedError(f"CSR reduce_sum does not support axes={axes}")

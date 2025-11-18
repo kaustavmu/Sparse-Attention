@@ -16,8 +16,8 @@ from needle.ops.sparse_ops import (
 )
 
 # If you want to test CSR NDArray end-to-end as well:
-from needle import ndarray_sparse as nds
-
+import needle as ndl
+from needle import backend_ndarray as nd
 
 # Helper function to convert SparseTensor -> NumPy array
 def dense_equiv(x):
@@ -46,8 +46,8 @@ def sample_sparse_matrices(request):
         B = SparseTensor(dense_B)
     else:
         # CSR NDArray backend
-        A_nd = nds.array(dense_A, device=nds.csr())
-        B_nd = nds.array(dense_B, device=nds.csr())
+        A_nd = nd.array(dense_A, device=nd.csr())
+        B_nd = nd.array(dense_B, device=nd.csr())
         A = SparseTensor(A_nd)
         B = SparseTensor(B_nd)
 
@@ -116,16 +116,47 @@ def test_sparse_relu(sample_sparse_matrices):
         np.maximum(dense_equiv(A), 0),
     )
 
-def test_sparse_matmul_backward_numpy():
-    # simple dense-backed SparseTensors
+def test_sparse_matmul_backward():
+    from needle.autograd import SparseTensor
+    from needle.ops.sparse_ops import sparse_matmul
+
     A = SparseTensor(np.array([[1., 0.], [0., 2.]], dtype=np.float32), requires_grad=True)
     B = SparseTensor(np.array([[0., 3.], [4., 0.]], dtype=np.float32), requires_grad=True)
 
-    out = sparse_matmul(A, B)     # 2x2
-    # Reduce to scalar so backward is defined
-    loss = Tensor(out.realize_cached_data().sum(), requires_grad=True)
+    # Forward
+    C = sparse_matmul(A, B)  # shape (2,2)
+
+    # Use SparseTensor.sum(), NOT Tensor
+    loss = C.sum()
     loss.backward()
 
-    # Check that gradients exist and shapes match
-    assert A.grad.shape == A.shape
-    assert B.grad.shape == B.shape
+    # Expected grads
+    expected_grad_A = np.array([[3., 0.], [0., 0.]], dtype=np.float32)
+    expected_grad_B = np.array([[1., 0.], [0., 2.]], dtype=np.float32)
+
+    np.testing.assert_allclose(A.grad.cached_data, expected_grad_A)
+    np.testing.assert_allclose(B.grad.cached_data, expected_grad_B)
+
+def test_sparse_sum(sample_sparse_matrices):
+    A, _ = sample_sparse_matrices
+    denseA = dense_equiv(A)
+
+    # sum entire matrix
+    out = A.sum()
+    np.testing.assert_allclose(dense_equiv(out), denseA.sum())
+
+    # sum along axis 0
+    out = A.sum(axes=0)
+    np.testing.assert_allclose(dense_equiv(out), denseA.sum(axis=0))
+
+    # sum along axis 1
+    out = A.sum(axes=1)
+    np.testing.assert_allclose(dense_equiv(out), denseA.sum(axis=1))
+
+def test_sparse_sum_backward():
+    A = SparseTensor(np.array([[1., 0.], [3., -2.]], dtype=np.float32), requires_grad=True)
+
+    loss = A.sum()   # scalar
+    loss.backward()
+
+    np.testing.assert_allclose(dense_equiv(A.grad), np.ones_like(dense_equiv(A)))

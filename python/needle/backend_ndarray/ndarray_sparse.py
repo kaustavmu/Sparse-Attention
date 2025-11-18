@@ -552,6 +552,9 @@ class NDArray:
             self.device.reduce_max(view.compact()._handle, out._handle, view.shape[-1])
         return out
 
+    def reduce_sum(self, axes=None):
+        return self.device.reduce_sum(self, axes)
+
 
 # Convenience top-level functions similar to numpy
 def array(a: Any, dtype: str = "float32", device: BackendDevice | None = None) -> NDArray:
