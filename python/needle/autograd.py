@@ -399,18 +399,79 @@ class SparseTensor(Value):
         from . import ops  # DO NOT import ones_like
 
         if out_grad is None:
-            # Create a scalar 1 matching this tensor's device
-            one = SparseTensor(
-                1.0,
-                device=getattr(self, "device", None),
-                requires_grad=False,
-            )
+            # Create a scalar 1 - convert to appropriate format
+            cached = self.realize_cached_data()
+            import numpy as np
+            if hasattr(cached, "numpy"):
+                # It's an NDArray, create scalar NDArray
+                try:
+                    from ..backend_ndarray import ndarray_sparse as nd
+                    device = cached.device if hasattr(cached, 'device') else nd.default_device()
+                    scalar_nd = nd.NDArray(np.array([1.0], dtype=np.float32), device=device)
+                    one = SparseTensor(scalar_nd, requires_grad=False)
+                except ImportError:
+                    # Fallback to numpy
+                    one = SparseTensor(np.array([1.0], dtype=np.float32), requires_grad=False)
+            else:
+                # It's a numpy array, create scalar numpy array
+                one = SparseTensor(np.array([1.0], dtype=np.float32), requires_grad=False)
             out_grad = one
 
         compute_gradient_of_variables(self, out_grad)
 
     def sum(self, axes=None):
         return needle.sparse_ops.Summation(axes)(self)
+    
+    def __matmul__(self, other):
+        """Matrix multiplication using @ operator."""
+        return needle.sparse_ops.SparseMatMul()(self, other)
+    
+    def matmul(self, other):
+        """Matrix multiplication."""
+        return needle.sparse_ops.SparseMatMul()(self, other)
+    
+    def broadcast_to(self, shape):
+        """Broadcast sparse tensor to new shape."""
+        cached = self.realize_cached_data()
+        if hasattr(cached, "broadcast_to"):
+            # It's an NDArray, use its broadcast_to
+            return SparseTensor.make_const(cached.broadcast_to(shape))
+        else:
+            # It's a numpy array, use numpy's broadcast_to
+            import numpy as np
+            broadcasted = np.broadcast_to(cached, shape)
+            return SparseTensor.make_const(broadcasted)
+    
+    def reshape(self, shape):
+        """Reshape sparse tensor to new shape."""
+        cached = self.realize_cached_data()
+        if hasattr(cached, "reshape"):
+            # It's an NDArray, use its reshape
+            return SparseTensor.make_const(cached.reshape(shape))
+        else:
+            # It's a numpy array, use numpy's reshape
+            import numpy as np
+            reshaped = np.reshape(cached, shape)
+            return SparseTensor.make_const(reshaped)
+    
+    def transpose(self, axes=None):
+        """Transpose sparse tensor. For 2D matrices, transposes rows and columns."""
+        # Use SparseTranspose op for 2D matrices
+        # If axes is provided, we could use permute for NDArrays, but for now
+        # we'll just transpose 2D matrices (which is the common case)
+        if axes is not None and axes != (1, 0) and axes != [1, 0]:
+            # For non-standard axes, use the underlying array's transpose/permute
+            cached = self.realize_cached_data()
+            if hasattr(cached, "permute"):
+                # It's an NDArray, use permute with the axes
+                if isinstance(axes, (list, tuple)) and len(axes) == 2:
+                    return SparseTensor.make_const(cached.permute(tuple(axes)))
+            # Fallback to numpy transpose
+            import numpy as np
+            transposed = np.transpose(cached, axes)
+            return SparseTensor.make_const(transposed)
+        # Default: use SparseTranspose for 2D transpose
+        return needle.sparse_ops.SparseTranspose()(self)
     
     @property
     def shape(self):

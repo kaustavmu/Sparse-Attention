@@ -7,8 +7,7 @@ from typing import Any, Callable, Iterable, Union
 import numpy as np
 
 from . import ndarray_backend_numpy
-from . import ndarray_backend_cpu  # type: ignore[attr-defined]
-from . import ndarray_backend_csr  # type: ignore[attr-defined]
+# ndarray_backend_cpu and ndarray_backend_csr are imported conditionally in their respective functions
 
 
 # math.prod not in Python 3.7
@@ -74,11 +73,19 @@ def cpu_numpy() -> BackendDevice:
 
 def cpu() -> BackendDevice:
     """Return cpu device"""
-    return BackendDevice("cpu", ndarray_backend_cpu)
+    try:
+        from . import ndarray_backend_cpu  # type: ignore[attr-defined]
+        return BackendDevice("cpu", ndarray_backend_cpu)
+    except ImportError:
+        return BackendDevice("cpu", None)
 
 def csr() -> BackendDevice:
     """Return CSR sparse device"""
-    return BackendDevice("csr", ndarray_backend_csr)
+    try:
+        from . import ndarray_backend_csr  # type: ignore[attr-defined]
+        return BackendDevice("csr", ndarray_backend_csr)
+    except ImportError:
+        return BackendDevice("csr", None)
 
 def default_device() -> BackendDevice:
     return cpu_numpy()
@@ -553,7 +560,19 @@ class NDArray:
         return out
 
     def reduce_sum(self, axes=None):
-        return self.device.reduce_sum(self, axes)
+        # Use the axes-based reduce_sum for CSR backend
+        if _is_csr_device(self.device):
+            result = self.device.reduce_sum_axes(self._handle, axes)
+            # Convert numpy result back to NDArray if needed
+            if isinstance(result, np.ndarray):
+                return NDArray(result, device=self.device)
+            else:
+                # Scalar result
+                return NDArray(np.array([result], dtype=np.float32), device=self.device)
+        else:
+            # For dense backends, they don't have reduce_sum with axes parameter
+            # Convert to numpy and use numpy's sum
+            return NDArray(self.numpy().sum(axis=axes), device=self.device)
 
 
 # Convenience top-level functions similar to numpy

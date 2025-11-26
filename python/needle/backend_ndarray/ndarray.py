@@ -6,7 +6,7 @@ from typing import Any, Callable, Iterable, Union
 import numpy as np
 
 from . import ndarray_backend_numpy
-from . import ndarray_backend_cpu  # type: ignore[attr-defined]
+# ndarray_backend_cpu is imported conditionally in cpu() function
 
 
 # math.prod not in Python 3.7
@@ -76,7 +76,11 @@ def cpu_numpy() -> BackendDevice:
 
 def cpu() -> BackendDevice:
     """Return cpu device"""
-    return BackendDevice("cpu", ndarray_backend_cpu)
+    try:
+        from . import ndarray_backend_cpu  # type: ignore[attr-defined]
+        return BackendDevice("cpu", ndarray_backend_cpu)
+    except ImportError:
+        return BackendDevice("cpu", None)
 
 
 def default_device() -> BackendDevice:

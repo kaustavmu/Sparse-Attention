@@ -1,4 +1,3 @@
-# ndarray_backend_csr.py
 import numpy as np
 
 __device_name__ = "csr"
@@ -102,6 +101,27 @@ def to_numpy(a: Array, shape, strides, offset):
     We'll produce a dense array (copy) and then use numpy stride_tricks to
     create desired view (mimicking the dense backend).
     """
+    # Handle 1D shapes specially - CSR stores as 2D but we need 1D output
+    if len(shape) == 1:
+        if a.shape is None:
+            result = np.zeros(shape[0], dtype=_datatype)
+        else:
+            # CSR structure is 2D (rows, cols), but we want 1D output
+            rows, cols = a.shape
+            # If the CSR has shape (rows, 1), it's likely a reduction result
+            # Extract the first (and only) column
+            if cols == 1:
+                dense_2d = _dense_from_csr(a.indptr, a.indices, a.data, (rows, cols))
+                result = dense_2d[:, 0]  # Extract first column
+            else:
+                # General case: flatten the 2D structure
+                dense_2d = _dense_from_csr(a.indptr, a.indices, a.data, (rows, cols))
+                flat = dense_2d.reshape(-1)
+                result = flat[offset:offset+shape[0]]
+        byte_strides = tuple([s * _datetype_size for s in strides])
+        return np.lib.stride_tricks.as_strided(result, shape, byte_strides)
+    
+    # For 2D+ shapes, convert to 2D representation
     rows, cols = _as_2d(shape) if len(shape) == 2 else (shape[0], int(np.prod(shape[1:])))
     dense = _dense_from_csr(a.indptr, a.indices, a.data, (rows, cols))
     # flatten then return as_strided similar to dense backend
@@ -143,17 +163,17 @@ def fill(out: Array, val):
         out.indptr = np.array([0], dtype=np.int64)
         out.indices = np.array([], dtype=np.int64)
         out.data = np.array([], dtype=_datatype)
-        # shape remains whatever it was; if unknown, keep None
     else:
         if out.shape is None:
-            # cannot choose shape; treat as single row of length size
             rows = 1
             cols = out._size
             out.shape = (rows, cols)
         rows, cols = out.shape
-        dense = np.full((rows, cols), val, dtype=_datatype)
-        indptr, indices, data = _csr_from_dense(dense)
-        out.indptr, out.indices, out.data = indptr, indices, data
+        # Fill with non-zero: all elements are non-zero
+        total = rows * cols
+        out.data = np.full(total, val, dtype=_datatype)
+        out.indices = np.tile(np.arange(cols, dtype=np.int64), rows)
+        out.indptr = np.arange(0, total + 1, cols, dtype=np.int64)
 
 
 def compact(a: Array, out: Array, shape, strides, offset):
@@ -181,253 +201,681 @@ def compact(a: Array, out: Array, shape, strides, offset):
 
 def ewise_setitem(a: Array, out: Array, shape, strides, offset):
     """
-    Set the subarray specified by (out, shape, strides, offset) to the dense
-    values represented by CSR a. We'll convert the out region to dense, reshape
-    into 2D, place the values, then convert back to CSR.
+    Set the subarray specified by (out, shape, strides, offset) to the values in CSR a.
+    If the view covers the entire array with standard strides, just copy a's structure.
     """
-    # get dense view of out (as numpy array) then assign
-    dense_out = to_numpy(out, shape, strides, offset)
-    # a.dense_flat is a copy; reshape appropriately
-    a_dense = _dense_from_csr(a.indptr, a.indices, a.data, (shape[0], int(np.prod(shape[1:]))) if len(shape) > 1 else (1, shape[0]))
-    # Now assign values into the view
-    dense_out[:] = a_dense.reshape(-1)
-    # Finally write dense_out back into CSR for the region (we will write to out's whole shape)
-    # If shape equals entire array shape and offset==0 and compact strides, then replace out entirely
-    if offset == 0 and strides == tuple([1] * len(shape)):
-        from_numpy(dense_out.reshape(shape), out)
-    else:
-        # perform full-densify of out and then write - simpler but correct
-        full_dense = to_numpy(out, out.shape, out.shape, 0).copy()
-        full_dense.reshape(shape)[:] = dense_out.reshape(shape)
-        from_numpy(full_dense.reshape(shape), out)
+    # Simple case: replacing entire array with compact strides
+    if offset == 0 and strides == tuple([1] * len(shape)) and shape == out.shape:
+        out.indptr = a.indptr.copy()
+        out.indices = a.indices.copy()
+        out.data = a.data.copy()
+        out.shape = a.shape
+        out._size = a._size
+        return
+    
+    # Complex case with slicing - need more sophisticated handling
+    # For now, fall back to dense (this is the hard case that would need slice translation)
+    dense_out = to_numpy(out, out.shape, tuple([1] * len(out.shape)), 0).copy()
+    a_dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
+    
+    # Apply the assignment using numpy's advanced indexing
+    view = np.lib.stride_tricks.as_strided(
+        dense_out.reshape(-1)[offset:], 
+        shape, 
+        tuple([s * _datetype_size for s in strides])
+    )
+    view[:] = a_dense.reshape(-1)[:np.prod(shape)]
+    
+    from_numpy(dense_out.reshape(out.shape), out)
 
 
 def scalar_setitem(size, val, out: Array, shape, strides, offset):
-    """Set the specified view in out to scalar val."""
-    # create target dense view and set to val, then write back entire out
-    dense_out = to_numpy(out, shape, strides, offset)
-    dense_out[:] = val
-    # write back to full out
-    full_dense = to_numpy(out, out.shape, out.shape, 0).copy()
-    # fill the slice within full_dense: we need to map offset & strides to indices; easiest is
-    # to reshape view and broadcast assignment (we already changed dense_out view which references full_dense's memory? to_numpy built a copy, so simpler to build full_dense then assign)
-    # Build indices for the flattened view:
-    # For simplicity: rebuild full dense from current csr -> then overwrite region
-    full = _dense_from_csr(out.indptr, out.indices, out.data, out.shape) if out.shape is not None else np.zeros(out._size, dtype=_datatype)
-    # Now compute the region in full to set:
-    flat_view = np.lib.stride_tricks.as_strided(full.reshape(-1)[offset:], shape, tuple([s * _datetype_size for s in strides]))
+    """Set the specified view in out to scalar val, working on sparse structure."""
+    
+    # Simple case: setting entire array with standard strides
+    if offset == 0 and strides == tuple([1] * len(shape)) and shape == out.shape:
+        fill(out, val)
+        return
+    
+    # Complex case: need to handle partial array updates
+    # This is challenging in pure sparse - we need to:
+    # 1. Identify which (row, col) positions are in the slice
+    # 2. Update/insert those positions with val (or remove if val==0)
+    
+    # For 2D arrays with row slicing, we can handle efficiently
+    if len(shape) == 2 and out.shape is not None:
+        rows, cols = out.shape
+        target_rows, target_cols = shape
+        
+        # Simple row-contiguous case with offset as row offset
+        if strides == (cols, 1) and target_cols == cols:
+            row_start = offset // cols
+            row_end = row_start + target_rows
+            
+            if val == 0:
+                # Remove values in these rows
+                new_data = []
+                new_indices = []
+                new_indptr = [0]
+                
+                for row in range(rows):
+                    if row < row_start or row >= row_end:
+                        # Keep this row
+                        start, end = out.indptr[row], out.indptr[row + 1]
+                        new_indices.extend(out.indices[start:end])
+                        new_data.extend(out.data[start:end])
+                    # else: skip rows in range (set to zero)
+                    new_indptr.append(len(new_data))
+                
+                out.indptr = np.array(new_indptr, dtype=np.int64)
+                out.indices = np.array(new_indices, dtype=np.int64)
+                out.data = np.array(new_data, dtype=_datatype)
+            else:
+                # Set these rows to val (dense rows)
+                new_data = []
+                new_indices = []
+                new_indptr = [0]
+                
+                for row in range(rows):
+                    if row < row_start or row >= row_end:
+                        # Keep this row as-is
+                        start, end = out.indptr[row], out.indptr[row + 1]
+                        new_indices.extend(out.indices[start:end])
+                        new_data.extend(out.data[start:end])
+                    else:
+                        # Set this row to all val
+                        new_indices.extend(range(cols))
+                        new_data.extend([val] * cols)
+                    new_indptr.append(len(new_data))
+                
+                out.indptr = np.array(new_indptr, dtype=np.int64)
+                out.indices = np.array(new_indices, dtype=np.int64)
+                out.data = np.array(new_data, dtype=_datatype)
+            return
+    
+    # Fallback for complex slicing: densify, modify, sparsify
+    # This is the general case that's hard to avoid for arbitrary slices
+    full = _dense_from_csr(out.indptr, out.indices, out.data, out.shape) if out.shape is not None else np.zeros(out._size, dtype=_datatype).reshape(1, -1)
+    flat_view = np.lib.stride_tricks.as_strided(
+        full.reshape(-1)[offset:], 
+        shape, 
+        tuple([s * _datetype_size for s in strides])
+    )
     flat_view[:] = val
     from_numpy(full.reshape(out.shape), out)
 
 
 # -------------------- elementwise and scalar ops --------------------
 
-def _ensure_same_shape_csr(a: Array, b: Array):
-    if a.shape is None or b.shape is None or a.shape != b.shape:
-        raise ValueError("CSR arrays must have same tracked shape for elementwise ops or be converted from compatible dense arrays.")
+def _csr_add_sparse(a: Array, b: Array, out: Array):
+    """Add two CSR matrices directly in sparse format."""
+    assert a.shape == b.shape, "Shapes must match"
+    rows, cols = a.shape
+    
+    out_data = []
+    out_indices = []
+    out_indptr = [0]
+    
+    for row in range(rows):
+        a_start, a_end = a.indptr[row], a.indptr[row + 1]
+        b_start, b_end = b.indptr[row], b.indptr[row + 1]
+        
+        a_cols = a.indices[a_start:a_end]
+        a_vals = a.data[a_start:a_end]
+        b_cols = b.indices[b_start:b_end]
+        b_vals = b.data[b_start:b_end]
+        
+        # Merge two sorted arrays
+        row_data = {}
+        for col, val in zip(a_cols, a_vals):
+            row_data[col] = val
+        for col, val in zip(b_cols, b_vals):
+            row_data[col] = row_data.get(col, 0) + val
+        
+        # Filter out zeros and sort
+        nonzero = [(col, val) for col, val in sorted(row_data.items()) if val != 0]
+        if nonzero:
+            cols, vals = zip(*nonzero)
+            out_indices.extend(cols)
+            out_data.extend(vals)
+        
+        out_indptr.append(len(out_data))
+    
+    out.indptr = np.array(out_indptr, dtype=np.int64)
+    out.indices = np.array(out_indices, dtype=np.int64)
+    out.data = np.array(out_data, dtype=_datatype)
+    out.shape = a.shape
+    out._size = rows * cols
 
 
-def _dense_binary_op_from_csr(func, a: Array, b: Array, out: Array):
-    """Apply a binary op (numpy ufunc-like) by densifying both args and writing result CSR to out."""
-    if a.shape is None or b.shape is None:
-        # densify both using recorded sizes
-        a_dense = _dense_from_csr(a.indptr, a.indices, a.data, (1, a._size))
-        b_dense = _dense_from_csr(b.indptr, b.indices, b.data, (1, b._size))
+def _csr_scalar_add(a: Array, val: float, out: Array):
+    """Add scalar to CSR matrix. If val != 0, result is dense."""
+    if val == 0:
+        # Just copy the sparse structure
+        out.indptr = a.indptr.copy()
+        out.indices = a.indices.copy()
+        out.data = a.data.copy()
+        out.shape = a.shape
+        out._size = a._size
     else:
-        a_dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-        b_dense = _dense_from_csr(b.indptr, b.indices, b.data, b.shape)
-    res = func(a_dense, b_dense)
-    from_numpy(res, out)
+        # Adding non-zero scalar makes matrix dense
+        rows, cols = a.shape
+        out_data = []
+        out_indices = []
+        out_indptr = [0]
+        
+        for row in range(rows):
+            start, end = a.indptr[row], a.indptr[row + 1]
+            sparse_cols = set(a.indices[start:end])
+            
+            # All columns become non-zero
+            for col in range(cols):
+                if col in sparse_cols:
+                    idx = np.where(a.indices[start:end] == col)[0][0]
+                    out_data.append(a.data[start + idx] + val)
+                else:
+                    out_data.append(val)
+                out_indices.append(col)
+            
+            out_indptr.append(len(out_data))
+        
+        out.indptr = np.array(out_indptr, dtype=np.int64)
+        out.indices = np.array(out_indices, dtype=np.int64)
+        out.data = np.array(out_data, dtype=_datatype)
+        out.shape = a.shape
+        out._size = rows * cols
 
+
+def _csr_multiply_sparse(a: Array, b: Array, out: Array):
+    """Element-wise multiply two CSR matrices (intersection only)."""
+    assert a.shape == b.shape, "Shapes must match"
+    rows, cols = a.shape
+    
+    out_data = []
+    out_indices = []
+    out_indptr = [0]
+    
+    for row in range(rows):
+        a_start, a_end = a.indptr[row], a.indptr[row + 1]
+        b_start, b_end = b.indptr[row], b.indptr[row + 1]
+        
+        a_cols = set(a.indices[a_start:a_end])
+        b_dict = {col: val for col, val in zip(b.indices[b_start:b_end], b.data[b_start:b_end])}
+        
+        # Only non-zero where both are non-zero
+        for i in range(a_start, a_end):
+            col = a.indices[i]
+            if col in b_dict:
+                val = a.data[i] * b_dict[col]
+                if val != 0:
+                    out_indices.append(col)
+                    out_data.append(val)
+        
+        out_indptr.append(len(out_data))
+    
+    out.indptr = np.array(out_indptr, dtype=np.int64)
+    out.indices = np.array(out_indices, dtype=np.int64)
+    out.data = np.array(out_data, dtype=_datatype)
+    out.shape = a.shape
+    out._size = rows * cols
+
+
+def _csr_scalar_mul(a: Array, val: float, out: Array):
+    """Multiply CSR matrix by scalar."""
+    if val == 0:
+        # Result is all zeros
+        out.indptr = np.array([0] * (a.shape[0] + 1), dtype=np.int64)
+        out.indices = np.array([], dtype=np.int64)
+        out.data = np.array([], dtype=_datatype)
+    else:
+        # Multiply all stored values
+        out.indptr = a.indptr.copy()
+        out.indices = a.indices.copy()
+        out.data = a.data * val
+    out.shape = a.shape
+    out._size = a._size
+
+
+def _csr_scalar_div(a: Array, val: float, out: Array):
+    """Divide CSR matrix by scalar."""
+    out.indptr = a.indptr.copy()
+    out.indices = a.indices.copy()
+    out.data = a.data / val
+    out.shape = a.shape
+    out._size = a._size
+
+
+def _csr_scalar_power(a: Array, val: float, out: Array):
+    """Raise CSR matrix to scalar power."""
+    # Note: zeros raised to positive power remain zero
+    out.indptr = a.indptr.copy()
+    out.indices = a.indices.copy()
+    out.data = a.data ** val
+    out.shape = a.shape
+    out._size = a._size
+
+
+def _csr_maximum_sparse(a: Array, b: Array, out: Array):
+    """Element-wise maximum of two CSR matrices."""
+    assert a.shape == b.shape, "Shapes must match"
+    rows, cols = a.shape
+    
+    out_data = []
+    out_indices = []
+    out_indptr = [0]
+    
+    for row in range(rows):
+        a_start, a_end = a.indptr[row], a.indptr[row + 1]
+        b_start, b_end = b.indptr[row], b.indptr[row + 1]
+        
+        a_dict = {col: val for col, val in zip(a.indices[a_start:a_end], a.data[a_start:a_end])}
+        b_dict = {col: val for col, val in zip(b.indices[b_start:b_end], b.data[b_start:b_end])}
+        
+        # Union of non-zero positions
+        all_cols = sorted(set(a_dict.keys()) | set(b_dict.keys()))
+        for col in all_cols:
+            val = max(a_dict.get(col, 0), b_dict.get(col, 0))
+            if val != 0:
+                out_indices.append(col)
+                out_data.append(val)
+        
+        out_indptr.append(len(out_data))
+    
+    out.indptr = np.array(out_indptr, dtype=np.int64)
+    out.indices = np.array(out_indices, dtype=np.int64)
+    out.data = np.array(out_data, dtype=_datatype)
+    out.shape = a.shape
+    out._size = rows * cols
+
+
+def _csr_scalar_maximum(a: Array, val: float, out: Array):
+    """Element-wise maximum of CSR matrix and scalar."""
+    rows, cols = a.shape
+    
+    if val <= 0:
+        # If val <= 0, just take max with stored values (others are 0)
+        out.indptr = a.indptr.copy()
+        out.indices = a.indices.copy()
+        out.data = np.maximum(a.data, val)
+    else:
+        # If val > 0, all zeros become val (matrix becomes dense)
+        out_data = []
+        out_indices = []
+        out_indptr = [0]
+        
+        for row in range(rows):
+            start, end = a.indptr[row], a.indptr[row + 1]
+            sparse_dict = {col: v for col, v in zip(a.indices[start:end], a.data[start:end])}
+            
+            for col in range(cols):
+                max_val = max(sparse_dict.get(col, 0), val)
+                out_indices.append(col)
+                out_data.append(max_val)
+            
+            out_indptr.append(len(out_data))
+        
+        out.indptr = np.array(out_indptr, dtype=np.int64)
+        out.indices = np.array(out_indices, dtype=np.int64)
+        out.data = np.array(out_data, dtype=_datatype)
+    
+    out.shape = a.shape
+    out._size = rows * cols
+
+
+def _csr_log(a: Array, out: Array):
+    """Element-wise log of CSR matrix (only on non-zero elements)."""
+    out.indptr = a.indptr.copy()
+    out.indices = a.indices.copy()
+    out.data = np.log(a.data)
+    out.shape = a.shape
+    out._size = a._size
+
+
+def _csr_exp(a: Array, out: Array):
+    """Element-wise exp of CSR matrix. Note: exp(0) = 1, so result is dense!"""
+    rows, cols = a.shape
+    out_data = []
+    out_indices = []
+    out_indptr = [0]
+    
+    for row in range(rows):
+        start, end = a.indptr[row], a.indptr[row + 1]
+        sparse_dict = {col: val for col, val in zip(a.indices[start:end], a.data[start:end])}
+        
+        # All positions become non-zero (exp(0) = 1)
+        for col in range(cols):
+            val = np.exp(sparse_dict.get(col, 0))
+            out_indices.append(col)
+            out_data.append(val)
+        
+        out_indptr.append(len(out_data))
+    
+    out.indptr = np.array(out_indptr, dtype=np.int64)
+    out.indices = np.array(out_indices, dtype=np.int64)
+    out.data = np.array(out_data, dtype=_datatype)
+    out.shape = a.shape
+    out._size = rows * cols
+
+
+def _csr_tanh(a: Array, out: Array):
+    """Element-wise tanh of CSR matrix (only on non-zero elements, tanh(0)=0)."""
+    out.indptr = a.indptr.copy()
+    out.indices = a.indices.copy()
+    out.data = np.tanh(a.data)
+    out.shape = a.shape
+    out._size = a._size
+
+
+def _csr_comparison(a: Array, b: Array, op, out: Array):
+    """Generic comparison operation between two CSR matrices."""
+    assert a.shape == b.shape, "Shapes must match"
+    rows, cols = a.shape
+    
+    out_data = []
+    out_indices = []
+    out_indptr = [0]
+    
+    for row in range(rows):
+        a_start, a_end = a.indptr[row], a.indptr[row + 1]
+        b_start, b_end = b.indptr[row], b.indptr[row + 1]
+        
+        a_dict = {col: val for col, val in zip(a.indices[a_start:a_end], a.data[a_start:a_end])}
+        b_dict = {col: val for col, val in zip(b.indices[b_start:b_end], b.data[b_start:b_end])}
+        
+        # Need to check all columns for comparisons
+        all_cols = sorted(set(a_dict.keys()) | set(b_dict.keys()) | set(range(cols)))
+        for col in all_cols:
+            a_val = a_dict.get(col, 0)
+            b_val = b_dict.get(col, 0)
+            result = op(a_val, b_val)
+            if result != 0:
+                out_indices.append(col)
+                out_data.append(_datatype(result))
+        
+        out_indptr.append(len(out_data))
+    
+    out.indptr = np.array(out_indptr, dtype=np.int64)
+    out.indices = np.array(out_indices, dtype=np.int64)
+    out.data = np.array(out_data, dtype=_datatype)
+    out.shape = a.shape
+    out._size = rows * cols
+
+
+def _csr_scalar_comparison(a: Array, val: float, op, out: Array):
+    """Generic comparison between CSR matrix and scalar."""
+    rows, cols = a.shape
+    out_data = []
+    out_indices = []
+    out_indptr = [0]
+    
+    for row in range(rows):
+        start, end = a.indptr[row], a.indptr[row + 1]
+        sparse_dict = {col: v for col, v in zip(a.indices[start:end], a.data[start:end])}
+        
+        for col in range(cols):
+            a_val = sparse_dict.get(col, 0)
+            result = op(a_val, val)
+            if result != 0:
+                out_indices.append(col)
+                out_data.append(_datatype(result))
+        
+        out_indptr.append(len(out_data))
+    
+    out.indptr = np.array(out_indptr, dtype=np.int64)
+    out.indices = np.array(out_indices, dtype=np.int64)
+    out.data = np.array(out_data, dtype=_datatype)
+    out.shape = a.shape
+    out._size = rows * cols
+
+
+# -------------------- Public API --------------------
 
 def ewise_add(a, b, out):
-    _dense_binary_op_from_csr(np.add, a, b, out)
+    _csr_add_sparse(a, b, out)
 
 
 def scalar_add(a, val, out):
-    dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    res = dense + val
-    from_numpy(res, out)
+    _csr_scalar_add(a, val, out)
 
 
 def ewise_mul(a, b, out):
-    _dense_binary_op_from_csr(np.multiply, a, b, out)
+    _csr_multiply_sparse(a, b, out)
 
 
 def scalar_mul(a, val, out):
-    dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    res = dense * val
-    from_numpy(res, out)
+    _csr_scalar_mul(a, val, out)
 
 
 def ewise_div(a, b, out):
-    _dense_binary_op_from_csr(np.divide, a, b, out)
+    # Division: need to handle division by zero carefully
+    # For sparse representation, divide stored values where b is non-zero
+    assert a.shape == b.shape, "Shapes must match"
+    rows, cols = a.shape
+    
+    out_data = []
+    out_indices = []
+    out_indptr = [0]
+    
+    for row in range(rows):
+        a_start, a_end = a.indptr[row], a.indptr[row + 1]
+        b_start, b_end = b.indptr[row], b.indptr[row + 1]
+        
+        a_dict = {col: val for col, val in zip(a.indices[a_start:a_end], a.data[a_start:a_end])}
+        b_dict = {col: val for col, val in zip(b.indices[b_start:b_end], b.data[b_start:b_end])}
+        
+        # Division is only defined where b is non-zero
+        for col in a_dict:
+            if col in b_dict:
+                result = a_dict[col] / b_dict[col]
+                if not np.isnan(result) and not np.isinf(result) and result != 0:
+                    out_indices.append(col)
+                    out_data.append(result)
+        
+        out_indptr.append(len(out_data))
+    
+    out.indptr = np.array(out_indptr, dtype=np.int64)
+    out.indices = np.array(out_indices, dtype=np.int64)
+    out.data = np.array(out_data, dtype=_datatype)
+    out.shape = a.shape
+    out._size = rows * cols
 
 
 def scalar_div(a, val, out):
-    dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    res = dense / val
-    from_numpy(res, out)
+    _csr_scalar_div(a, val, out)
 
 
 def scalar_power(a, val, out):
-    dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    res = dense ** val
-    from_numpy(res, out)
+    _csr_scalar_power(a, val, out)
 
 
 def ewise_maximum(a, b, out):
-    _dense_binary_op_from_csr(np.maximum, a, b, out)
+    _csr_maximum_sparse(a, b, out)
 
 
 def scalar_maximum(a, val, out):
-    dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    res = np.maximum(dense, val)
-    from_numpy(res, out)
+    _csr_scalar_maximum(a, val, out)
 
 
 def ewise_eq(a, b, out):
-    _dense_binary_op_from_csr(lambda x, y: (x == y).astype(_datatype), a, b, out)
+    _csr_comparison(a, b, lambda x, y: float(x == y), out)
 
 
 def scalar_eq(a, val, out):
-    dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    res = (dense == val).astype(_datatype)
-    from_numpy(res, out)
+    _csr_scalar_comparison(a, val, lambda x, y: float(x == y), out)
 
 
 def ewise_ge(a, b, out):
-    _dense_binary_op_from_csr(lambda x, y: (x >= y).astype(_datatype), a, b, out)
+    _csr_comparison(a, b, lambda x, y: float(x >= y), out)
 
 
 def scalar_ge(a, val, out):
-    dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    res = (dense >= val).astype(_datatype)
-    from_numpy(res, out)
+    _csr_scalar_comparison(a, val, lambda x, y: float(x >= y), out)
 
 
 def ewise_log(a, out):
-    dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    res = np.log(dense)
-    from_numpy(res, out)
+    _csr_log(a, out)
 
 
 def ewise_exp(a, out):
-    dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    res = np.exp(dense)
-    from_numpy(res, out)
+    _csr_exp(a, out)
 
 
 def ewise_tanh(a, out):
-    dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    res = np.tanh(dense)
-    from_numpy(res, out)
-
-def reduce_sum(a, axes=None):
-    return a.reduce_sum(axes)
+    _csr_tanh(a, out)
 
 
 # -------------------- matmul --------------------
 
 def matmul(a: Array, b: Array, out: Array, m: int, n: int, p: int):
     """
-    Multiplication of two arrays. We expect a.shape == (m,n) and b.shape == (n,p).
-    We'll implement a CSR @ dense path where a is CSR and b is dense (fast).
-    If b is CSR too, we densify b (simple fallback).
-    The result is written into out as CSR.
+    CSR @ CSR matrix multiplication using sparse operations.
+    a is (m, n) and b is (n, p), result is (m, p).
     """
-    # get dense shape info for a and b
-    a_rows, a_cols = (a.shape if a.shape is not None else (m, n))
-    b_rows, b_cols = (b.shape if b.shape is not None else (n, p))
-
-    # build dense view for b — if b is sparse, densify
-    if getattr(b, "shape", None) is not None and b.shape is not None and b.indices.size == 0:
-        # b is empty
-        b_dense = np.zeros((n, p), dtype=_datatype)
-    elif hasattr(b, "indptr") and hasattr(b, "indices") and hasattr(b, "data"):
-        # b is CSR -> densify
-        b_dense = _dense_from_csr(b.indptr, b.indices, b.data, (n, p))
-    else:
-        # fallback: if b has dense_flat attribute
-        try:
-            b_dense = b.dense_flat.reshape(n, p)
-        except Exception:
-            # final fallback: zero
-            b_dense = np.zeros((n, p), dtype=_datatype)
-
-    # a is CSR: iterate rows and perform row-wise multiply (efficient)
-    res = np.zeros((m, p), dtype=_datatype)
-    for r in range(m):
-        start = a.indptr[r]
-        end = a.indptr[r + 1]
-        if end > start:
-            cols = a.indices[start:end]
-            vals = a.data[start:end].astype(_datatype)
-            # multiply vals (len k) with b_dense[cols,:] -> sum over k
-            # Compute weighted sum of rows of b_dense at columns 'cols' scaled by 'vals'
-            # Equivalent to res[r,:] = vals @ b_dense[cols, :]
-            # We'll vectorize: res[r] += sum_j vals[j] * b_dense[cols[j], :]
-            res_r = (vals.reshape(-1, 1) * b_dense[cols, :]).sum(axis=0)
-            res[r, :] = res_r
-
-    from_numpy(res, out)
+    # Build column-indexed structure for b (CSC-like access)
+    b_by_col = [[] for _ in range(p)]
+    for row in range(n):
+        start, end = b.indptr[row], b.indptr[row + 1]
+        for idx in range(start, end):
+            col = b.indices[idx]
+            val = b.data[idx]
+            b_by_col[col].append((row, val))
+    
+    out_data = []
+    out_indices = []
+    out_indptr = [0]
+    
+    for row in range(m):
+        # For this row of a, compute dot products with columns of b
+        a_start, a_end = a.indptr[row], a.indptr[row + 1]
+        if a_end == a_start:
+            # Empty row in a
+            out_indptr.append(len(out_data))
+            continue
+        
+        a_cols = a.indices[a_start:a_end]
+        a_vals = a.data[a_start:a_end]
+        
+        # Compute each column of result
+        row_result = {}
+        for a_idx, a_col in enumerate(a_cols):
+            a_val = a_vals[a_idx]
+            # Multiply by row a_col of b
+            b_start, b_end = b.indptr[a_col], b.indptr[a_col + 1]
+            for b_idx in range(b_start, b_end):
+                b_col = b.indices[b_idx]
+                b_val = b.data[b_idx]
+                row_result[b_col] = row_result.get(b_col, 0) + a_val * b_val
+        
+        # Add non-zeros to output
+        for col in sorted(row_result.keys()):
+            val = row_result[col]
+            if val != 0:
+                out_indices.append(col)
+                out_data.append(val)
+        
+        out_indptr.append(len(out_data))
+    
+    out.indptr = np.array(out_indptr, dtype=np.int64)
+    out.indices = np.array(out_indices, dtype=np.int64)
+    out.data = np.array(out_data, dtype=_datatype)
+    out.shape = (m, p)
+    out._size = m * p
 
 
 # -------------------- reductions --------------------
 
 def reduce_max(a: Array, out: Array, reduce_size):
     """
-    reduce_size is number of elements to reduce on last axis;
-    We reconstruct dense, reshape and reduce.
+    Reduce max along last axis directly on sparse representation.
     """
-    if a.shape is None:
-        dense = np.zeros((1, a._size), dtype=_datatype)
+    rows = a.shape[0]
+    cols = a.shape[1]
+    
+    # Assuming reduce along last axis (columns)
+    result = []
+    for row in range(rows):
+        start, end = a.indptr[row], a.indptr[row + 1]
+        if end > start:
+            # Max of non-zero values vs implicit zeros
+            max_val = np.max(a.data[start:end])
+            # But need to consider if there are zeros too
+            num_nonzero = end - start
+            if num_nonzero < cols:
+                # There are implicit zeros
+                max_val = max(max_val, 0)
+            result.append(max_val)
+        else:
+            # All zeros
+            result.append(0)
+    
+    # Convert result to CSR
+    result_arr = np.array(result, dtype=_datatype)
+    from_numpy(result_arr.reshape(-1, 1), out)
+
+
+def reduce_sum(a: Array, out: Array, reduce_size):
+    """
+    Reduce sum along last axis directly on sparse representation.
+    This matches the signature expected by NDArray.sum() method.
+    The view has been permuted so the reduction axis is last.
+    """
+    rows = a.shape[0]
+    cols = a.shape[1]
+    
+    # Reduce along last axis (which is the reduction axis after permute)
+    result = []
+    for row in range(rows):
+        start, end = a.indptr[row], a.indptr[row + 1]
+        # Sum of non-zero values (implicit zeros don't contribute)
+        row_sum = np.sum(a.data[start:end])
+        result.append(row_sum)
+    
+    # Convert result array
+    result_arr = np.array(result, dtype=_datatype)
+    
+    # Check if output should be 1D or 2D based on out's shape
+    # If out.shape is 1D, we need to handle it specially since CSR is 2D
+    # For 1D outputs, we'll store as (rows, 1) in CSR but the NDArray wrapper will handle the shape
+    # For 2D outputs (keepdims=True), we can use (rows, 1) directly
+    if len(result_arr.shape) == 1:
+        # 1D result - store as (rows, 1) in CSR, but note the actual shape
+        from_numpy(result_arr.reshape(-1, 1), out)
+        # The NDArray wrapper will handle the 1D shape correctly via to_numpy
     else:
-        dense = _dense_from_csr(a.indptr, a.indices, a.data, a.shape)
-    # flatten and reshape to (-1, reduce_size)
-    flat = dense.reshape(-1)
-    resh = flat.reshape(-1, reduce_size)
-    res = resh.max(axis=1)
-    from_numpy(res, out)
+        from_numpy(result_arr.reshape(-1, 1), out)
 
 
-def reduce_sum(a, axes=None):
+def reduce_sum_axes(a, axes=None):
     """
-    Reduce sum for CSR NDArray.
-    Supports:
-      - sum all elements
-      - sum along axis 0 or 1
+    Reduce sum for CSR array with axes parameter.
+    Used by NDArray.reduce_sum() method.
+    Operates directly on sparse representation.
     """
-    data = a.data
-    indices = a.indices
-    indptr = a.indptr
-    m, n = a.shape
-
     if axes is None:
         # Sum all stored values
-        return np.sum(data)
-
-    # Normalize to tuple
+        return np.sum(a.data)
+    
     if isinstance(axes, int):
         axes = (axes,)
-
-    # Only 2D sparse matrices supported
+    
+    rows, cols = a.shape
+    
     if axes == (0,):
-        # Column sum: go through stored elements
-        out = np.zeros(n, dtype=data.dtype)
-        for row in range(m):
-            start, end = indptr[row], indptr[row + 1]
-            cols = indices[start:end]
-            vals = data[start:end]
-            out[cols] += vals
+        # Column sum
+        out = np.zeros(cols, dtype=a.data.dtype)
+        for row in range(rows):
+            start, end = a.indptr[row], a.indptr[row + 1]
+            cols_idx = a.indices[start:end]
+            vals = a.data[start:end]
+            out[cols_idx] += vals
         return out
-
+    
     if axes == (1,):
-        # Row sum: sum slices
-        out = np.zeros(m, dtype=data.dtype)
-        for row in range(m):
-            start, end = indptr[row], indptr[row + 1]
-            out[row] = np.sum(data[start:end])
+        # Row sum
+        out = np.zeros(rows, dtype=a.data.dtype)
+        for row in range(rows):
+            start, end = a.indptr[row], a.indptr[row + 1]
+            out[row] = np.sum(a.data[start:end])
         return out
-
+    
     raise NotImplementedError(f"CSR reduce_sum does not support axes={axes}")
