@@ -1,7 +1,6 @@
 """Core data structures."""
 import needle
-from .backend_numpy import Device, cpu, all_devices
-from typing import List, Optional, NamedTuple, Tuple, Union
+from typing import Any, Dict, List, Optional, NamedTuple, Tuple, Union
 from collections import namedtuple
 import numpy
 from needle import init
@@ -10,13 +9,9 @@ from needle import init
 LAZY_MODE = False
 TENSOR_COUNTER = 0
 
-# NOTE: we will import numpy as the array_api
-# as the backend for our computations, this line will change in later homeworks
+from .backend_selection import array_api, NDArray, Device, cpu, all_devices
 
-import numpy as array_api
-NDArray = numpy.ndarray
-
-from .backend_selection import array_api, NDArray
+SparseNDArray = Any
 
 class Op:
     """Operator definition."""
@@ -300,7 +295,16 @@ class Tensor(Value):
         # numpy array always sits on cpu
         if array_api is numpy:
             return cpu()
-        return data.device
+        dev = getattr(data, "device", None)
+        if isinstance(dev, str):
+            # Normalized string labels to backend devices.
+            if dev.lower() == "cpu":
+                return cpu()
+            if dev.lower().startswith("cuda"):
+                return needle.cuda()
+        if dev is None:
+            return cpu()
+        return dev
 
     def backward(self, out_grad=None):
         out_grad = (
@@ -405,7 +409,7 @@ class SparseTensor(Value):
             if hasattr(cached, "numpy"):
                 # It's an NDArray, create scalar NDArray
                 try:
-                    from ..backend_ndarray import ndarray_sparse as nd
+                    from needle.backend_ndarray import ndarray_sparse as nd
                     device = cached.device if hasattr(cached, 'device') else nd.default_device()
                     scalar_nd = nd.NDArray(np.array([1.0], dtype=np.float32), device=device)
                     one = SparseTensor(scalar_nd, requires_grad=False)

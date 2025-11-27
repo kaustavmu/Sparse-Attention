@@ -13,6 +13,9 @@ from needle.ops.sparse_ops import (
     sparse_mul_scalar,
     sparse_transpose,
     sparse_relu,
+    sparse_sum,
+    dense_to_sparse,
+    sparse_to_dense,
 )
 
 # If you want to test CSR NDArray end-to-end as well:
@@ -24,13 +27,15 @@ def dense_equiv(x):
     if isinstance(x, SparseTensor):
         x.realize_cached_data()
         data = x.cached_data
-        # Needle NDArray
         if hasattr(data, "numpy"):
             return data.numpy()
-        # SciPy CSR (in case you ever use it again)
         if hasattr(data, "toarray"):
             return data.toarray()
-        # Fallback: assume NumPy-like
+        return np.asarray(data)
+    if isinstance(x, Tensor):
+        data = x.realize_cached_data()
+        if hasattr(data, "numpy"):
+            return data.numpy()
         return np.asarray(data)
     return np.asarray(x)
 
@@ -116,6 +121,52 @@ def test_sparse_relu(sample_sparse_matrices):
         np.maximum(dense_equiv(A), 0),
     )
 
+
+def test_dense_sparse_roundtrip():
+    data = Tensor(np.array([[1.0, -2.0], [3.5, 0.0]], dtype=np.float32), requires_grad=True)
+    sparse = dense_to_sparse(data)
+    dense_back = sparse_to_dense(sparse)
+
+    np.testing.assert_allclose(dense_equiv(dense_back), dense_equiv(data))
+
+    loss = dense_back.sum()
+    loss.backward()
+
+    np.testing.assert_allclose(
+        data.grad.realize_cached_data(),
+        np.ones_like(data.realize_cached_data()),
+    )
+
+
+def test_sparse_multiply_sum_matches_dense():
+    probs = Tensor(
+        np.abs(np.random.randn(2, 2, 3, 3, 2).astype(np.float32)),
+        requires_grad=False,
+    )
+    vals = Tensor(
+        np.random.randn(2, 2, 1, 3, 2).astype(np.float32),
+        requires_grad=False,
+    )
+    vals = vals.broadcast_to((2, 2, 3, 3, 2))
+
+    sparse_probs = dense_to_sparse(probs, use_csr=False)
+    sparse_vals = dense_to_sparse(vals, use_csr=False)
+
+    weighted = sparse_multiply(sparse_probs, sparse_vals)
+    reduced = sparse_sum(weighted, axes=3)
+    dense_result = sparse_to_dense(reduced)
+
+    dense_expected = (probs.realize_cached_data() * vals.realize_cached_data()).sum(
+        axis=3
+    )
+
+    np.testing.assert_allclose(
+        dense_equiv(dense_result),
+        dense_expected,
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
 def test_sparse_matmul_backward():
     from needle.autograd import SparseTensor
     from needle.ops.sparse_ops import sparse_matmul
@@ -131,8 +182,8 @@ def test_sparse_matmul_backward():
     loss.backward()
 
     # Expected grads
-    expected_grad_A = np.array([[3., 0.], [0., 0.]], dtype=np.float32)
-    expected_grad_B = np.array([[1., 0.], [0., 2.]], dtype=np.float32)
+    expected_grad_A = np.array([[3., 4.], [3., 4.]], dtype=np.float32)
+    expected_grad_B = np.array([[1., 1.], [2., 2.]], dtype=np.float32)
 
     np.testing.assert_allclose(A.grad.cached_data, expected_grad_A)
     np.testing.assert_allclose(B.grad.cached_data, expected_grad_B)

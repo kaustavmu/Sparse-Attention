@@ -1,5 +1,6 @@
 import numpy as np
-from ..autograd import SparseTensorOp, SparseTensor
+from ..autograd import SparseTensorOp, SparseTensor, TensorOp
+from .. import backend_ndarray as nd
 
 
 ###########################################################
@@ -18,7 +19,15 @@ def _to_dense(x):
     # Needle NDArray: has numpy() method
     if hasattr(x, "numpy"):
         return x.numpy()
-    return np.asarray(x)
+    arr = np.asarray(x)
+    if arr.dtype == object:
+        flat = [ _to_dense(elem) for elem in arr.ravel() ]
+        if not flat:
+            return np.asarray([])
+        first = np.asarray(flat[0])
+        stacked = np.stack([np.asarray(elem) for elem in flat])
+        return stacked.reshape(arr.shape + first.shape)
+    return arr
 
 
 def _is_needle_array(x) -> bool:
@@ -53,6 +62,14 @@ def sparse_relu(a):
 
 def sparse_sum(a, axes=None):
     return Summation(axes)(a)
+
+
+def dense_to_sparse(a, threshold=0.0, use_csr=True):
+    return DenseToSparse(threshold=threshold, use_csr=use_csr)(a)
+
+
+def sparse_to_dense(a):
+    return SparseToDense()(a)
 
 
 ###########################################################
@@ -100,11 +117,35 @@ class SparseMatMul(SparseTensorOp):
         return _to_dense(a) @ _to_dense(b)
 
     def gradient(self, out_grad, node):
+        def _realize(val):
+            return val.realize_cached_data() if hasattr(val, "realize_cached_data") else val
+
+        def _is_ndarray(obj):
+            return _is_needle_array(obj)
+
+        def _transpose_data(data):
+            if _is_ndarray(data):
+                if hasattr(data, "permute"):
+                    return data.permute((1, 0))
+                if hasattr(data, "transpose"):
+                    return data.transpose()
+            return _to_dense(data).T
+
+        def _matmul(lhs, rhs):
+            if _is_ndarray(lhs) and _is_ndarray(rhs):
+                return lhs @ rhs
+            return _to_dense(lhs) @ _to_dense(rhs)
+
         a, b = node.inputs
-        # d/dA (A @ B) = out_grad @ B^T
-        # d/dB (A @ B) = A^T @ out_grad
-        grad_a = out_grad @ b.transpose()
-        grad_b = a.transpose() @ out_grad
+        a_data = _realize(a)
+        b_data = _realize(b)
+        out_data = _realize(out_grad)
+
+        grad_a_data = _matmul(out_data, _transpose_data(b_data))
+        grad_b_data = _matmul(_transpose_data(a_data), out_data)
+
+        grad_a = SparseTensor.make_const(grad_a_data)
+        grad_b = SparseTensor.make_const(grad_b_data)
         return grad_a, grad_b
 
 
@@ -220,3 +261,39 @@ class Summation(SparseTensorOp):
 
         reshaped = out_grad.reshape(new_shape)
         return reshaped.broadcast_to(x_shape)
+
+
+class DenseToSparse(SparseTensorOp):
+    """
+    Convert a dense Tensor into a SparseTensor while optionally thresholding
+    small entries and moving the storage to the CSR backend.
+    """
+
+    def __init__(self, threshold=0.0, use_csr=True):
+        self.threshold = threshold
+        self.use_csr = use_csr
+
+    def compute(self, a):
+        data = _to_dense(a).astype(np.float32)
+
+        if self.threshold is not None and self.threshold > 0:
+            mask = np.abs(data) >= self.threshold
+            data = data * mask
+
+        if self.use_csr and nd.csr().enabled():
+            return nd.array(data, device=nd.csr())
+        return data
+
+    def gradient(self, out_grad, node):
+        return (sparse_to_dense(out_grad),)
+
+
+class SparseToDense(TensorOp):
+    """Convert SparseTensor back to a dense Tensor."""
+
+    def compute(self, a):
+        dense = _to_dense(a).astype(np.float32)
+        return nd.array(dense)
+
+    def gradient(self, out_grad, node):
+        return (dense_to_sparse(out_grad),)

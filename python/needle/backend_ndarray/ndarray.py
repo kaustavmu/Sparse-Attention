@@ -58,6 +58,14 @@ class BackendDevice:
         arr.fill(fill_value)
         return arr
 
+    def ones(self, *shape: int, dtype: str = "float32") -> "NDArray":
+        """Allocate an array of ones on this device."""
+        return self.full(shape, 1.0, dtype)
+
+    def zeros(self, *shape: int, dtype: str = "float32") -> "NDArray":
+        """Allocate an array of zeros on this device."""
+        return self.full(shape, 0.0, dtype)
+
 
 def cuda() -> BackendDevice:
     """Return cuda device"""
@@ -217,6 +225,15 @@ class NDArray:
         return self.device.to_numpy(
             self._handle, self.shape, self.strides, self._offset
         )
+
+    def __array__(self, dtype=None, copy=None):
+        """Allow seamless conversion to numpy arrays."""
+        arr = self.numpy()
+        if dtype is not None:
+            arr = arr.astype(dtype)
+        if copy:
+            return arr.copy()
+        return arr
 
     def is_compact(self) -> bool:
         """Return true if array is compact in memory and internal size equals product

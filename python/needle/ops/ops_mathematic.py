@@ -6,13 +6,7 @@ from typing import Optional, List, Tuple, Union
 from ..autograd import NDArray
 from ..autograd import Op, Tensor, Value, TensorOp, SparseTensorOp
 from ..autograd import TensorTuple, TensorTupleOp
-import numpy
-
-# NOTE: we will import numpy as the array_api
-# as the backend for our computations, this line will change in later homeworks
-
-BACKEND = "np"
-import numpy as array_api
+from ..backend_selection import array_api
 
 class EWiseAdd(TensorOp):
     def compute(self, a: NDArray, b: NDArray):
