@@ -149,7 +149,20 @@ class Transpose(TensorOp):
 
     def compute(self, a):
         ### BEGIN YOUR SOLUTION
-        return array_api.swapaxes(a, self.axes[0], self.axes[1]) if self.axes is not None else array_api.swapaxes(a, -1, -2)
+        if hasattr(a, "permute"):
+            rank = len(a.shape)
+            axes = list(range(rank))
+            if self.axes is None:
+                if rank >= 2:
+                    axes[-1], axes[-2] = axes[-2], axes[-1]
+            else:
+                ax0 = self.axes[0] if self.axes[0] >= 0 else rank + self.axes[0]
+                ax1 = self.axes[1] if self.axes[1] >= 0 else rank + self.axes[1]
+                axes[ax0], axes[ax1] = axes[ax1], axes[ax0]
+            return a.permute(tuple(axes))
+        if self.axes is None:
+            return array_api.swapaxes(a, -1, -2)
+        return array_api.swapaxes(a, self.axes[0], self.axes[1])
         ### END YOUR SOLUTION
 
     def gradient(self, out_grad, node):

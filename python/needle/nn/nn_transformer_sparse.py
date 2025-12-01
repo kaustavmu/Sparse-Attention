@@ -36,7 +36,7 @@ class MultiHeadAttention(Module):
         num_global_tokens = 0,
         block_stride = 0,
         random_tokens = 0,
-        sparsity_threshold = 1e-6,
+        sparsity_threshold = 0.0,
         mask_seed = 0,
     ):
 
@@ -447,7 +447,9 @@ class Transformer(Module):
         device = None,
         dtype = "float32",
         batch_first = False,
-        sequence_len = 2048
+        sequence_len = 2048,
+        use_sparse_positional_embedding: bool = True,
+        positional_one_hot_threshold: float = 0.5,
     ):
 
         super().__init__()
@@ -456,15 +458,18 @@ class Transformer(Module):
         self.dtype = dtype
         self.batch_first = batch_first
         self.sequence_len = sequence_len
-
-        if Embedding is None:
-            raise ImportError(
-                "Transformer requires needle.nn.nn_sequence.Embedding, "
-                "which is not available in this build.",
-            )
+        self.use_sparse_positional_embedding = use_sparse_positional_embedding
+        self.positional_one_hot_threshold = positional_one_hot_threshold
 
         ### BEGIN YOUR SOLUTION
-        self.position_embedding = Embedding(sequence_len, embedding_size, device=device, dtype=dtype)
+        self.position_embedding = Embedding(
+            sequence_len,
+            embedding_size,
+            device=device,
+            dtype=dtype,
+            use_sparse=self.use_sparse_positional_embedding,
+            one_hot_threshold=self.positional_one_hot_threshold,
+        )
         self.transformer_layers = Sequential(*[
             TransformerLayer(
                 embedding_size,

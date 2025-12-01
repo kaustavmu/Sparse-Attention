@@ -272,10 +272,8 @@ class NDArray:
         if prod(self.shape) != prod(new_shape):
             raise ValueError("Total size of new array must be unchanged")
         # Some backends (CSR) can reshape by just updating shape metadata if they support it.
-        if not self.is_compact():
-            # require compact for reshape on dense backends; for csr backend, device.compact was used earlier to get a compact handle
-            raise ValueError("Reshape only supported for compact arrays")
-        return NDArray.make(new_shape, device=self.device, handle=self._handle)
+        source = self if self.is_compact() else self.compact()
+        return NDArray.make(new_shape, device=source.device, handle=source._handle)
 
     def permute(self, new_axes: tuple[int, ...]) -> "NDArray":
         if sorted(new_axes) != list(range(self.ndim)):

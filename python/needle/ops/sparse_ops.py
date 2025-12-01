@@ -274,6 +274,7 @@ class DenseToSparse(SparseTensorOp):
         self.use_csr = use_csr
 
     def compute(self, a):
+        target_device = getattr(a, "device", None)
         data = _to_dense(a).astype(np.float32)
 
         if self.threshold is not None and self.threshold > 0:
@@ -281,8 +282,11 @@ class DenseToSparse(SparseTensorOp):
             data = data * mask
 
         if self.use_csr and nd.csr().enabled():
-            return nd.array(data, device=nd.csr())
-        return data
+            device_name = getattr(target_device, "name", None)
+            if target_device is None or device_name == "csr":
+                return nd.array(data, device=nd.csr())
+        dense_device = target_device if target_device is not None else nd.default_device()
+        return nd.array(data, device=dense_device)
 
     def gradient(self, out_grad, node):
         return (sparse_to_dense(out_grad),)
@@ -293,7 +297,11 @@ class SparseToDense(TensorOp):
 
     def compute(self, a):
         dense = _to_dense(a).astype(np.float32)
-        return nd.array(dense)
+        source_device = getattr(a, "device", None)
+        if source_device is not None and getattr(source_device, "name", "") == "csr":
+            source_device = nd.cpu()
+        target_device = source_device if source_device is not None else nd.default_device()
+        return nd.array(dense, device=target_device)
 
     def gradient(self, out_grad, node):
         return (dense_to_sparse(out_grad),)
