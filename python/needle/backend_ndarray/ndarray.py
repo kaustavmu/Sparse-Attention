@@ -285,9 +285,8 @@ class NDArray:
         ### BEGIN YOUR SOLUTION
         if prod(self.shape) != prod(new_shape):
             raise ValueError("Total size of new array must be unchanged")
-        if not self.is_compact():
-            raise ValueError("Reshape only supported for compact arrays")
-        return NDArray.make(new_shape, device=self.device, handle=self._handle)
+        source = self if self.is_compact() else self.compact()
+        return NDArray.make(new_shape, device=source.device, handle=source._handle)
         ### END YOUR SOLUTION
 
     def permute(self, new_axes: tuple[int, ...]) -> "NDArray":
@@ -637,6 +636,10 @@ class NDArray:
         view, out = self.reduce_view_out(axis, keepdims=keepdims)
         self.device.reduce_max(view.compact()._handle, out._handle, view.shape[-1])
         return out
+
+    def reduce_sum(self, axes=None):
+        """Fallback axes-based reduction used by sparse helpers."""
+        return NDArray(self.numpy().sum(axis=axes), device=self.device)
 
 
 

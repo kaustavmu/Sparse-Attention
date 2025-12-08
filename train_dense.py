@@ -1,8 +1,14 @@
+"""
+Entry point to train the PTB model using the original dense NDArray backend.
+
+This script mirrors train.py but forces NEEDLE_NDARRAY_IMPL=dense so we can
+compare runtime/memory between dense and sparse implementations.
+"""
 import os
 import sys
 
-# Ensure we train with the sparse NDArray backend.
-os.environ.setdefault("NEEDLE_NDARRAY_IMPL", "sparse")
+# Ensure the dense backend is selected before needle gets imported.
+os.environ.setdefault("NEEDLE_NDARRAY_IMPL", "dense")
 
 sys.path.append("./python")
 import needle as ndl
@@ -15,7 +21,7 @@ from memory_utils import MemoryTracker
 
 
 def _resolve_device():
-    """Prefer CUDA when available, otherwise fall back to CPU."""
+    """Try CUDA first, otherwise fall back to CPU."""
     try:
         return ndl.cuda()
     except Exception:
@@ -23,10 +29,11 @@ def _resolve_device():
 
 
 def main():
-    tracker = MemoryTracker("Sparse PTB")
+    tracker = MemoryTracker("Dense PTB")
     tracker.checkpoint("script start")
 
     device = _resolve_device()
+    print(f"Using dense needle backend on device: {device}")
     tracker.checkpoint(f"device ready ({device})")
 
     corpus = ndl.data.Corpus("data/ptb")
@@ -65,3 +72,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
