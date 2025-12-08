@@ -126,6 +126,19 @@ class NDArray:
 
     def __init__(self, other, device=None):
         """Create by copying another NDArray, or from numpy"""
+        # Convert string device to BackendDevice
+        if isinstance(device, str):
+            if device == 'cpu':
+                device = cpu()
+            elif device == 'cpu_numpy':
+                device = cpu_numpy()
+            elif device == 'cuda':
+                device = cuda()
+            elif device == 'csr':
+                device = csr()
+            else:
+                device = None
+        
         if isinstance(other, NDArray):
             # create a copy of existing NDArray
             if device is None:
@@ -173,7 +186,25 @@ class NDArray:
         array._shape = tuple(shape)
         array._strides = NDArray.compact_strides(shape) if strides is None else strides
         array._offset = offset
-        array._device = device if device is not None else default_device()
+        
+        # FIX: Convert string device to BackendDevice object
+        if device is None:
+            array._device = default_device()
+        elif isinstance(device, str):
+            # Convert string to BackendDevice
+            if device == 'cpu':
+                array._device = cpu()
+            elif device == 'cpu_numpy':
+                array._device = cpu_numpy()
+            elif device == 'cuda':
+                array._device = cuda()
+            elif device == 'csr':
+                array._device = csr()
+            else:
+                array._device = default_device()
+        else:
+            array._device = device
+        
         if handle is None:
             array._handle = array.device.Array(prod(shape))
         else:
