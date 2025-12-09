@@ -108,11 +108,6 @@ class MultiHeadAttention(Module):
         result = None
         probs = None
 
-        print("MultiHeadAttention.forward devices:",
-      "q device", getattr(q, "device", None),
-      "k device", getattr(k, "device", None),
-      "v device", getattr(v, "device", None))
-
         ### BEGIN YOUR SOLUTION
         qk = self.matmul(q, k) / math.sqrt(q_dim) # (bs, head, q_len, k_len)
 
@@ -204,11 +199,6 @@ class AttentionLayer(Module):
         Output: the output `result` with shape (batch_size, kv_len, out_features)
         """
 
-        print("AttentionLayer.forward devices:",
-                "q.device", getattr(q, "device", None),
-                "k.device", getattr(k, "device", None),
-                "v.device", getattr(v, "device", None))
-
         if k is None:
             k = q
         if v is None:
@@ -236,11 +226,6 @@ class AttentionLayer(Module):
         q_w = q_w.transpose(axes=(1, 2)) # (bs, num_head, q_len, d)
         k_w = k_w.transpose(axes=(1, 2)) # (bs, num_head, k_len, d)
         v_w = v_w.transpose(axes=(1, 2)) # (bs, num_head, k_len, d)
-
-        print("after proj:", 
-      "q_w device", getattr(q_w, "device", None),
-      "k_w device", getattr(k_w, "device", None),
-      "v_w device", getattr(v_w, "device", None))
 
         out, probs = self.attn(q_w, k_w, v_w) # (bs, num_head, q_len, d)
         out = out.transpose(axes=(1, 2)).reshape((batch_size * q_len, self.num_head * self.dim_head)) # (bs, q_len, d * head)

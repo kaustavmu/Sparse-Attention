@@ -31,14 +31,14 @@ def main():
 
     corpus = ndl.data.Corpus("data/ptb")
     train_data = ndl.data.batchify(
-        corpus.train, batch_size=32, device=device, dtype="float32"
+        corpus.train, batch_size=8, device=device, dtype="float32"
     )
     tracker.checkpoint("data batchified")
 
     model = LanguageModel(
         20,
         len(corpus.dictionary),
-        hidden_size=32,
+        hidden_size=16,
         num_layers=1,
         seq_model="transformer",
         seq_len=20,

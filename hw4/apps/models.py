@@ -103,8 +103,6 @@ class LanguageModel(nn.Module):
         # Embedding layer
         self.embedding = nn.Embedding(output_size, embedding_size, device=device, dtype=dtype)
         
-        print(seq_model)
-
         # Sequence model (RNN or LSTM)
         if seq_model == 'rnn':
             self.seq_model_layer = nn.RNN(embedding_size, hidden_size, num_layers, 
@@ -133,33 +131,26 @@ class LanguageModel(nn.Module):
             else h is tuple of (h0, c0), each of shape (num_layers, bs, hidden_size)
         """
         ### BEGIN YOUR SOLUTION
-        # Add debugging
-        print(f"LanguageModel.forward input x.shape: {x.shape}")
         
         # x: (seq_len, bs)
         seq_len, bs = x.shape
         
         # Embedding: (seq_len, bs, embedding_size)
         embedded = self.embedding(x)
-        print(f"After embedding: {embedded.shape}")
         
         if self.seq_model == 'transformer':
             # Transformer doesn't use hidden state like RNN/LSTM
             out, _ = self.seq_model_layer(embedded)
-            print(f"After transformer: {out.shape}")
             h = None  # Transformers don't have hidden state
         else:
             # RNN/LSTM: returns (output, hidden_state)
             out, h = self.seq_model_layer(embedded, h)
-            print(f"After RNN/LSTM: {out.shape}")
         
         # Reshape for linear layer: (seq_len*bs, hidden_size)
         out = out.reshape((seq_len * bs, self.hidden_size))
-        print(f"After reshape: {out.shape}")
         
         # Linear layer: (seq_len*bs, output_size)
         out = self.linear(out)
-        print(f"After linear: {out.shape}")
         
         return out, h
         ### END YOUR SOLUTION
